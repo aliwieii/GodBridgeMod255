@@ -1,4 +1,4 @@
-name: Build GodBridgeUltra
+name: Merge GodBridgeUltra Archive
 
 on:
   workflow_dispatch:
@@ -10,67 +10,104 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  merge:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Set up Java 8
+      - name: Set up Java
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '8'
 
-      - name: Inspect repository
-        shell: bash
-        run: |
-          echo "===== Repository files ====="
-          find . -maxdepth 4 -type f | sort | head -300
-
-          echo "===== Gradle files ====="
-          find . -type f \( \
-            -name 'build.gradle' -o \
-            -name 'build.gradle.kts' -o \
-            -name 'settings.gradle' -o \
-            -name 'settings.gradle.kts' -o \
-            -name 'gradlew' \
-          \) -print
-
-          echo "===== ZIP and JAR files ====="
-          find . -type f \( -name '*.zip' -o -name '*.jar' \) -print
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
-
-      - name: Build project
+      - name: Inspect and merge archive
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ -f gradlew ]; then
-            chmod +x gradlew
-            ./gradlew --no-daemon --stacktrace build
-          elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then
-            gradle --no-daemon --stacktrace build
-          else
-            echo "::error::No Gradle build file found at repository root."
-            echo "Inspect the repository listing above."
+          echo "===== Repository files ====="
+          find . -type f \
+            ! -path './.git/*' | sort
+
+          mapfile -t ZIPS < <(
+            find . -type f -iname '*.zip' \
+              ! -path './.git/*' \
+              ! -path './.github/*'
+          )
+
+          mapfile -t JARS < <(
+            find . -type f -iname '*.jar' \
+              ! -path './.git/*' \
+              ! -path './.github/*'
+          )
+
+          if [ "${#ZIPS[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one ZIP archive."
+            printf 'Found: %s\n' "${ZIPS[@]}"
             exit 1
           fi
 
-      - name: Locate build outputs
-        if: success()
-        shell: bash
-        run: |
-          find . -type f -path '*/build/libs/*.jar' -print
+          if [ "${#JARS[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one input JAR."
+            printf 'Found: %s\n' "${JARS[@]}"
+            exit 1
+          fi
 
-      - name: Upload JAR
-        if: success()
+          ZIP="${ZIPS[0]}"
+          JAR="${JARS[0]}"
+
+          echo "Archive: $ZIP"
+          echo "Input JAR: $JAR"
+
+          WORK="$RUNNER_TEMP/godbridge"
+          mkdir -p "$WORK/extracted" dist
+
+          unzip -q "$ZIP" -d "$WORK/extracted"
+
+          SRC="$WORK/extracted"
+
+          shopt -s dotglob nullglob
+          ENTRIES=("$SRC"/*)
+
+          if [ "${#ENTRIES[@]}" -eq 1 ] &&
+             [ -d "${ENTRIES[0]}" ]; then
+            SRC="${ENTRIES[0]}"
+          fi
+
+          echo "===== Archive contents ====="
+          find "$SRC" -type f | sort
+
+          if ! find "$SRC" -type f \
+            -name '*.class' -print -quit | grep -q .; then
+            echo "::error::No compiled .class files found."
+            echo "The archive cannot be merged as compiled mod files."
+            echo "Source-only archives require a proper build process."
+            exit 1
+          fi
+
+          OUTPUT="dist/GodBridgeUltra-merged.jar"
+          cp "$JAR" "$OUTPUT"
+
+          # Remove old signatures invalidated by modifications.
+          zip -q -d "$OUTPUT" \
+            'META-INF/*.SF' \
+            'META-INF/*.RSA' \
+            'META-INF/*.DSA' || true
+
+          # Overlay archive files onto the copied JAR.
+          jar uf "$OUTPUT" -C "$SRC" .
+
+          echo "===== Result ====="
+          jar tf "$OUTPUT" | head -200
+          ls -lh "$OUTPUT"
+
+      - name: Upload merged JAR
         uses: actions/upload-artifact@v4
         with:
-          name: GodBridgeUltra-JAR
-          path: '**/build/libs/*.jar'
+          name: GodBridgeUltra-Merged
+          path: dist/GodBridgeUltra-merged.jar
           if-no-files-found: error
           retention-days: 14
